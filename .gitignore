@@ -1,0 +1,4 @@
+*.o
+bin/sfssh
+data/*.testing
+*.a

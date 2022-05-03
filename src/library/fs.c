@@ -347,8 +347,6 @@ bool inode_offset_sanity_check(int start_block, int start_index_at_block) {
     );
 }
 
-
-
 size_t readInode(size_t inumber, char *data, size_t length, size_t offset) {
     // Load inode information
     Block inode_block;
@@ -364,6 +362,7 @@ size_t readInode(size_t inumber, char *data, size_t length, size_t offset) {
     
     if (!load_inode(inumber, &inode_block, &idata)) return -1;
     inode = idata.inode;
+    if (!inode->Valid) return -1;
 
     start_block = offset/BLOCK_SIZE;
     start_index_at_block = offset%BLOCK_SIZE;
@@ -455,6 +454,7 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
     if (!load_inode(inumber, &inode_block, &idata)) return -1;
     if (idata.inode->Size < offset) return -1;
     inode = idata.inode;
+    if (!inode->Valid) return -1;
 
     start_block = offset/BLOCK_SIZE;
     start_index_at_block = offset%BLOCK_SIZE;

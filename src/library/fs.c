@@ -27,6 +27,7 @@ typedef struct InodeData {
     Inode* inode;
     u_int32_t block;
     u_int32_t offset;
+    Block inode_block;
 } InodeData;
 
 // Init functions
@@ -69,7 +70,7 @@ bool get_free_inode_number(InodeTable* table, int* to_store) {
     else return false;
 } 
 
-bool load_inode(u_int32_t inode_number, Block* toStoreBlock, InodeData* toStoreIndex) {
+bool load_inode(u_int32_t inode_number, InodeData* toStoreIndex) {
     if (
         inode_number >= disk_metadata.Inodes || 
         inode_number < 0 ||
@@ -79,12 +80,10 @@ bool load_inode(u_int32_t inode_number, Block* toStoreBlock, InodeData* toStoreI
     u_int32_t inode_block_number=inode_number/INODES_PER_BLOCK + 1;
     u_int32_t inode_block_offset=inode_number%INODES_PER_BLOCK;
 
-    mounted_disk->readDisk(mounted_disk, inode_block_number, toStoreBlock->Data);
-    *toStoreIndex = (InodeData) {
-        .block = inode_block_number,
-        .offset = inode_block_offset,
-        .inode = toStoreBlock->Inodes + inode_block_offset
-    };
+    mounted_disk->readDisk(mounted_disk, inode_block_number, toStoreIndex->inode_block.Data);
+    toStoreIndex->block = inode_block_number;
+    toStoreIndex->offset = inode_block_offset;
+    toStoreIndex->inode = toStoreIndex->inode_block.Inodes + inode_block_offset;
     return true;
 }
 
@@ -264,17 +263,16 @@ bool mount(Disk *disk) {
 // Create inode ----------------------------------------------------------------
 size_t create() {
     int free_inode;
-    Block inode_block_buffer;
     InodeData index;
 
     if (!disk_registered) return -1;
     if (!get_free_inode_number(&inode_table, &free_inode)) return -1;
-    if(!load_inode(free_inode, &inode_block_buffer, &index)) return -1;
+    if(!load_inode(free_inode, &index)) return -1;
     
-    inode_block_buffer.Inodes[index.offset].Valid = 1;
-    inode_block_buffer.Inodes[index.offset].Size = 0;
+    index.inode->Valid = 1;
+    index.inode->Size = 0;
 
-    mounted_disk->writeDisk(mounted_disk, index.block, inode_block_buffer.Data);
+    mounted_disk->writeDisk(mounted_disk, index.block, index.inode_block.Data);
     inode_table.entries[free_inode].available = false;
     return free_inode;
 }
@@ -283,7 +281,6 @@ size_t create() {
 
 bool removeInode(size_t inumber) {
     // Inode data
-    Block inode_block_buffer;
     InodeData idata;
     Inode* inode;
     
@@ -293,7 +290,7 @@ bool removeInode(size_t inumber) {
     Block indirect_block;
 
     // Load inode information
-    if(!load_inode(inumber, &inode_block_buffer, &idata)) return false;
+    if(!load_inode(inumber, &idata)) return false;
     inode = idata.inode;
     if (inode->Valid == 0) return false;
 
@@ -321,7 +318,7 @@ bool removeInode(size_t inumber) {
 
     // Clear inode in inode table
     inode->Valid = 0;
-    mounted_disk->writeDisk(mounted_disk, idata.block, inode_block_buffer.Data);
+    mounted_disk->writeDisk(mounted_disk, idata.block, idata.inode_block.Data);
     inode_table.entries[inumber].available = true;
     return true;
 }
@@ -331,8 +328,7 @@ bool removeInode(size_t inumber) {
 size_t stat(size_t inumber) {
     // Load inode information
     InodeData idata;
-    Block block_buffer;
-    if (!load_inode(inumber, &block_buffer, &idata)) return -1;
+    if (!load_inode(inumber, &idata)) return -1;
     if (idata.inode->Valid == 0) return -1;
     return idata.inode->Size;
 }
@@ -349,7 +345,6 @@ bool inode_offset_sanity_check(int start_block, int start_index_at_block) {
 
 size_t readInode(size_t inumber, char *data, size_t length, size_t offset) {
     // Load inode information
-    Block inode_block;
     Block indirect_block;
     Block block_buffer;
     InodeData idata;
@@ -360,7 +355,7 @@ size_t readInode(size_t inumber, char *data, size_t length, size_t offset) {
     bool should_use_direct_blocks;
     int bytes_copied = 0;
     
-    if (!load_inode(inumber, &inode_block, &idata)) return -1;
+    if (!load_inode(inumber, &idata)) return -1;
     inode = idata.inode;
     if (!inode->Valid) return -1;
 
@@ -428,17 +423,16 @@ int allocate_block() {
     return -1;
 } 
 
-void update_inode_and_save(int bytes_copied, int offset, InodeData* idata, Block* ib) {
+void update_inode_and_save(int bytes_copied, int offset, InodeData* idata) {
     int real_logical_size = idata->inode->Size - offset;
     if (real_logical_size < bytes_copied) {
         idata->inode->Size += (bytes_copied - real_logical_size);
-        mounted_disk->writeDisk(mounted_disk, idata->block, ib->Data);
+        mounted_disk->writeDisk(mounted_disk, idata->block, idata->inode_block.Data);
     }
 }
 
 size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
     // Load inode
-    Block inode_block;
     Block indirect_block;
     Block block_buffer;
     InodeData idata;
@@ -448,10 +442,9 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
     int real_start_block;
     bool should_use_direct_blocks;
     int bytes_copied = 0;
-    int bytes_copied_on_new_blocks = 0;
     
     // Inital validation of input data
-    if (!load_inode(inumber, &inode_block, &idata)) return -1;
+    if (!load_inode(inumber, &idata)) return -1;
     if (idata.inode->Size < offset) return -1;
     inode = idata.inode;
     if (!inode->Valid) return -1;
@@ -474,11 +467,11 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
         if (inode->Direct[current_block] == 0) {
             int allocated_block = allocate_block();
             if (allocated_block < 0) { // If no storage update inode size in disk and return
-                update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
+                update_inode_and_save(bytes_copied, offset, &idata);
                 return bytes_copied;
             }
             inode->Direct[current_block] = allocated_block;
-            mounted_disk->writeDisk(mounted_disk, idata.block, inode_block.Data); // keep inode in disk up to date
+            mounted_disk->writeDisk(mounted_disk, idata.block, idata.inode_block.Data); // keep inode in disk up to date
         }
 
         mounted_disk->readDisk(mounted_disk, inode->Direct[current_block], block_buffer.Data); // read block in direct vetor
@@ -495,7 +488,7 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
     }
 
     if (bytes_copied >= length) {
-        update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
+        update_inode_and_save(bytes_copied, offset, &idata);
         return bytes_copied;
     }
 
@@ -503,11 +496,11 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
     if (inode->Indirect == 0) {
         int allocated_block = allocate_block();
         if (allocated_block < 0) {
-            update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
+            update_inode_and_save(bytes_copied, offset, &idata);
             return bytes_copied;
         }
         inode->Indirect = allocated_block;
-        mounted_disk->writeDisk(mounted_disk, idata.block, inode_block.Data); // Safe new inode state in disk
+        mounted_disk->writeDisk(mounted_disk, idata.block, idata.inode_block.Data); // Safe new inode state in disk
     }
     mounted_disk->readDisk(mounted_disk, inode->Indirect, indirect_block.Data);
     current_block = should_use_direct_blocks? current_block - POINTERS_PER_INODE: current_block;
@@ -517,7 +510,7 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
         if (indirect_block.Pointers[current_block] == 0) {
             int allocated_block = allocate_block();
             if (allocated_block < 0) {
-                update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
+                update_inode_and_save(bytes_copied, offset, &idata);
                 return bytes_copied;
             }
             indirect_block.Pointers[current_block] = allocated_block;
@@ -536,6 +529,6 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
         current_offset = 0;
     }
     
-    update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
+    update_inode_and_save(bytes_copied, offset, &idata);
     return bytes_copied;
 }

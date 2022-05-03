@@ -182,7 +182,7 @@ void do_copyout(Disk *disk, FileSystem *fs, int args, char *arg1, char *arg2) {
     	return;
     }
 
-    if (!copyout(fs, atoi(arg1), arg2)) {
+    if (copyout(fs, atoi(arg1), arg2) <= 0) {
     	printf("copyout failed!\n");
     }
 }

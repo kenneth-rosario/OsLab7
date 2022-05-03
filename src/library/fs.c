@@ -362,9 +362,7 @@ size_t readInode(size_t inumber, char *data, size_t length, size_t offset) {
     bool should_use_direct_blocks;
     int bytes_copied = 0;
     
-
     if (!load_inode(inumber, &inode_block, &idata)) return -1;
-    if (idata.inode->Valid==0) return -1;
     inode = idata.inode;
 
     start_block = offset/BLOCK_SIZE;
@@ -374,36 +372,41 @@ size_t readInode(size_t inumber, char *data, size_t length, size_t offset) {
     should_use_direct_blocks = start_block < POINTERS_PER_INODE;
     real_start_block = should_use_direct_blocks? start_block: start_block - POINTERS_PER_INODE;
 
+    int max_bytes_possible_to_read = inode->Size - offset;
+    int total_bytes_to_read = length < max_bytes_possible_to_read? length: max_bytes_possible_to_read;
+    
     int current_block = real_start_block;
     int current_offset = start_index_at_block;
-    int missing_bytes = length;
+    int missing_bytes = total_bytes_to_read;
 
     // Read block from direct vector
-    if (should_use_direct_blocks) {
-        while (bytes_copied < length && current_block < POINTERS_PER_INODE) {
-            if (inode->Direct[current_block] == 0) return bytes_copied; // Nothing else to read
-            mounted_disk->readDisk(mounted_disk, inode->Direct[current_block], block_buffer.Data);
-            int bytes_to_read = missing_bytes <= (BLOCK_SIZE-current_offset)? missing_bytes: BLOCK_SIZE-current_offset;
-            memcpy(data + bytes_copied, block_buffer.Data + current_offset, bytes_to_read);
-            missing_bytes -= bytes_to_read;
-            bytes_copied += bytes_to_read;
-            current_block++;
-            current_offset = 0;
-        }
+    while (should_use_direct_blocks && bytes_copied < total_bytes_to_read && current_block < POINTERS_PER_INODE) {
+        if (inode->Direct[current_block] == 0) return bytes_copied; // Nothing else to read
+        mounted_disk->readDisk(mounted_disk, inode->Direct[current_block], block_buffer.Data);
         
-        if (bytes_copied >= length) return bytes_copied;
+        int bytes_to_read = missing_bytes <= (BLOCK_SIZE-current_offset)? missing_bytes: BLOCK_SIZE-current_offset;
+        memcpy(data + bytes_copied, block_buffer.Data + current_offset, bytes_to_read);
+
+        missing_bytes -= bytes_to_read;
+        bytes_copied += bytes_to_read;
+        current_block++;
+        current_offset = 0;
     }
+        
+    if (bytes_copied >= total_bytes_to_read) return bytes_copied;
 
     // Read block from indirect vector
     if (inode->Indirect == 0) return bytes_copied;
     mounted_disk->readDisk(mounted_disk, inode->Indirect, indirect_block.Data);
     current_block = current_block%POINTERS_PER_INODE;
 
-    while (bytes_copied < length && current_block < POINTERS_PER_BLOCK) {
-        if (indirect_block.Pointers[current_block] == 0) return bytes_copied;
+    while (bytes_copied < total_bytes_to_read && current_block < POINTERS_PER_BLOCK) {
+        if (indirect_block.Pointers[current_block] == 0) return bytes_copied; // Nothing else to read
         mounted_disk->readDisk(mounted_disk, indirect_block.Pointers[current_block], block_buffer.Data);
+
         int bytes_to_read =  missing_bytes <= (BLOCK_SIZE-current_offset)? missing_bytes: BLOCK_SIZE-current_offset;
         memcpy(data + bytes_copied, block_buffer.Data + current_offset, bytes_to_read);
+
         missing_bytes -= bytes_to_read;
         bytes_copied += bytes_to_read;
         current_block++;
@@ -426,9 +429,12 @@ int allocate_block() {
     return -1;
 } 
 
-void update_inode_and_save(int bytes_copied, InodeData* idata, Block* ib) {
-    idata->inode->Size += bytes_copied;
-    mounted_disk->writeDisk(mounted_disk, idata->block, ib->Data);
+void update_inode_and_save(int bytes_copied, int offset, InodeData* idata, Block* ib) {
+    int real_logical_size = idata->inode->Size - offset;
+    if (real_logical_size < bytes_copied) {
+        idata->inode->Size += (bytes_copied - real_logical_size);
+        mounted_disk->writeDisk(mounted_disk, idata->block, ib->Data);
+    }
 }
 
 size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
@@ -445,8 +451,9 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
     int bytes_copied = 0;
     int bytes_copied_on_new_blocks = 0;
     
+    // Inital validation of input data
     if (!load_inode(inumber, &inode_block, &idata)) return -1;
-    if (idata.inode->Valid==0) return -1;
+    if (idata.inode->Size < offset) return -1;
     inode = idata.inode;
 
     start_block = offset/BLOCK_SIZE;
@@ -454,50 +461,49 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
     if (!inode_offset_sanity_check(start_block, start_index_at_block)) return -1;
 
     should_use_direct_blocks = start_block < POINTERS_PER_INODE;
-    real_start_block = should_use_direct_blocks? start_block: start_block - POINTERS_PER_INODE;
+    real_start_block = should_use_direct_blocks? start_block: start_block - POINTERS_PER_INODE; // index on wither direct vector or indirect
 
     int current_block = real_start_block;
     int current_offset = start_index_at_block;
     int missing_bytes = length;
     
-    // Write block and copy to data
-    // Read block from direct vector
-    if (should_use_direct_blocks) {
-        while (bytes_copied < length && current_block < POINTERS_PER_INODE) {
-            bool new_block_created = false;
-            if (inode->Direct[current_block] == 0) {
-                int allocated_block = allocate_block();
-                if (allocated_block < 0) {
-                    update_inode_and_save(bytes_copied_on_new_blocks, &idata, &inode_block);
-                    return bytes_copied;
-                }
-                new_block_created = true;
-                inode->Direct[current_block] = allocated_block;
-                mounted_disk->writeDisk(mounted_disk, idata.block, inode_block.Data); // Safe new inode state in disk
-            } // Nothing else to read
-            mounted_disk->readDisk(mounted_disk, inode->Direct[current_block], block_buffer.Data);
-            int bytes_to_read = missing_bytes <= (BLOCK_SIZE-current_offset)? missing_bytes: BLOCK_SIZE-current_offset;
-            memcpy(block_buffer.Data + current_offset, data + bytes_copied, bytes_to_read);
-            mounted_disk->writeDisk(mounted_disk, inode->Direct[current_block], block_buffer.Data);
-            if (new_block_created) bytes_copied_on_new_blocks += bytes_to_read;
-            missing_bytes -= bytes_to_read;
-            bytes_copied += bytes_to_read;
-            current_block++;
-            current_offset = 0;
+    
+    // Iterate over direct block writing data only if start_block is form 0-PPOINTERS_PER_INODE
+    while (should_use_direct_blocks && bytes_copied < length && current_block < POINTERS_PER_INODE) {
+        // If direct block is not allocated, allocate a new block
+        if (inode->Direct[current_block] == 0) {
+            int allocated_block = allocate_block();
+            if (allocated_block < 0) { // If no storage update inode size in disk and return
+                update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
+                return bytes_copied;
+            }
+            inode->Direct[current_block] = allocated_block;
+            mounted_disk->writeDisk(mounted_disk, idata.block, inode_block.Data); // keep inode in disk up to date
         }
+
+        mounted_disk->readDisk(mounted_disk, inode->Direct[current_block], block_buffer.Data); // read block in direct vetor
+        int bytes_to_read = missing_bytes <= (BLOCK_SIZE-current_offset)? missing_bytes: BLOCK_SIZE-current_offset; // compute how many bytes should be read
+
+        memcpy(block_buffer.Data + current_offset, data + bytes_copied, bytes_to_read);  // copy into inode
+        mounted_disk->writeDisk(mounted_disk, inode->Direct[current_block], block_buffer.Data); 
         
-        if (bytes_copied >= length) {
-            update_inode_and_save(bytes_copied_on_new_blocks, &idata, &inode_block);
-            return bytes_copied;
-        }
+        // Book keeping for loop
+        missing_bytes -= bytes_to_read; 
+        bytes_copied += bytes_to_read;
+        current_block++;
+        current_offset = 0;
     }
 
-    // Read block from indirect vector
-    if (bytes_copied >= length) return bytes_copied;
-    if (inode->Indirect == 0 && bytes_copied < length) {
+    if (bytes_copied >= length) {
+        update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
+        return bytes_copied;
+    }
+
+    // If no indirect block, allocate new indirect
+    if (inode->Indirect == 0) {
         int allocated_block = allocate_block();
         if (allocated_block < 0) {
-            update_inode_and_save(bytes_copied_on_new_blocks, &idata, &inode_block);
+            update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
             return bytes_copied;
         }
         inode->Indirect = allocated_block;
@@ -506,31 +512,30 @@ size_t writeInode(size_t inumber, char *data, size_t length, size_t offset) {
     mounted_disk->readDisk(mounted_disk, inode->Indirect, indirect_block.Data);
     current_block = current_block%POINTERS_PER_INODE;
 
+    // Do the same but iterating over indirect vector of block pointers
     while (bytes_copied < length && current_block < POINTERS_PER_BLOCK) {
-        bool new_block_created = false;
         if (indirect_block.Pointers[current_block] == 0) {
             int allocated_block = allocate_block();
             if (allocated_block < 0) {
-                update_inode_and_save(bytes_copied_on_new_blocks, &idata, &inode_block);
+                update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
                 return bytes_copied;
             }
             indirect_block.Pointers[current_block] = allocated_block;
             mounted_disk->writeDisk(mounted_disk, inode->Indirect, indirect_block.Data);
-            new_block_created = true;
         };
+
         mounted_disk->readDisk(mounted_disk, indirect_block.Pointers[current_block], block_buffer.Data);
         int bytes_to_read =  missing_bytes <= (BLOCK_SIZE-current_offset)? missing_bytes: BLOCK_SIZE-current_offset;
 
         memcpy(block_buffer.Data + current_offset, data + bytes_copied, bytes_to_read);
         mounted_disk->writeDisk(mounted_disk, indirect_block.Pointers[current_block], block_buffer.Data);
 
-        if(new_block_created) bytes_copied_on_new_blocks += bytes_copied;
-
         missing_bytes -= bytes_to_read;
         bytes_copied += bytes_to_read;
         current_block++;
         current_offset = 0;
     }
-    update_inode_and_save(bytes_copied_on_new_blocks, &idata, &inode_block);
+    
+    update_inode_and_save(bytes_copied, offset, &idata, &inode_block);
     return bytes_copied;
 }

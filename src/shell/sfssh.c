@@ -193,7 +193,7 @@ void do_create(Disk *disk, FileSystem *fs, int args, char *arg1, char *arg2) {
     	return;
     }
 
-    size_t inumber = fs->create();
+    int inumber = fs->create();
     if (inumber >= 0) {
     	printf("created inode %d.\n", inumber);
     } else {
@@ -267,12 +267,12 @@ bool copyout(FileSystem *fs, size_t inumber, const char *path) {
     char buffer[4*BUFSIZ] = {0};
     size_t offset = 0;
     while (true) {
-    	size_t result = fs->readInode(inumber, buffer, sizeof(buffer), offset);
+    	int result = fs->readInode(inumber, buffer, sizeof(buffer), offset);
     	if (result <= 0) {
     	    break;
-	}
-	fwrite(buffer, 1, result, stream);
-	offset += result;
+		}
+		fwrite(buffer, 1, result, stream);
+		offset += result;
     }
 
     printf("%zd bytes copied\n", offset);
@@ -293,18 +293,17 @@ bool copyin(FileSystem *fs, const char *path, size_t inumber) {
     	size_t result = fread(buffer, 1, sizeof(buffer), stream);
     	if (result <= 0) {
     	    break;
-	}
-
-	size_t actual = fs->writeInode(inumber, buffer, result, offset);
-	if (actual < 0) {
-	    fprintf(stderr, "fs->write returned invalid result %d\n", actual);
-            break;
-	}
-	offset += actual;
-	if (actual != result) {
-	    fprintf(stderr, "fs->write only wrote %d bytes, not %zd bytes\n", actual, result);
-            break;
-	}
+		}
+		int actual = fs->writeInode(inumber, buffer, result, offset);
+		if (actual < 0) {
+			fprintf(stderr, "fs->write returned invalid result %d\n", actual);
+				break;
+		}
+		offset += actual;
+		if (actual != result) {
+			fprintf(stderr, "fs->write only wrote %d bytes, not %zd bytes\n", actual, result);
+				break;
+		}
     }
 
     printf("%zd bytes copied\n", offset);

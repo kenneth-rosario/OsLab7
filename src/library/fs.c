@@ -72,7 +72,8 @@ bool get_free_inode_number(InodeTable* table, int* to_store) {
 bool load_inode(u_int32_t inode_number, Block* toStoreBlock, InodeData* toStoreIndex) {
     if (
         inode_number >= disk_metadata.Inodes || 
-        inode_number < 0
+        inode_number < 0 ||
+        !mounted_disk
     ) return false;
 
     u_int32_t inode_block_number=inode_number/INODES_PER_BLOCK + 1;

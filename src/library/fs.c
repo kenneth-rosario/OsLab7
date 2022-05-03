@@ -380,7 +380,7 @@ size_t readInode(size_t inumber, char *data, size_t length, size_t offset) {
 
     // Read block from direct vector
     while (should_use_direct_blocks && bytes_copied < total_bytes_to_read && current_block < POINTERS_PER_INODE) {
-        if (inode->Direct[current_block] == 0) continue; // Nothing else to read
+        if (inode->Direct[current_block] == 0) return bytes_copied; // Nothing else to read
         mounted_disk->readDisk(mounted_disk, inode->Direct[current_block], block_buffer.Data);
         
         int bytes_to_read = missing_bytes <= (BLOCK_SIZE-current_offset)? missing_bytes: BLOCK_SIZE-current_offset;
@@ -400,7 +400,7 @@ size_t readInode(size_t inumber, char *data, size_t length, size_t offset) {
     current_block = should_use_direct_blocks? current_block - POINTERS_PER_INODE: current_block;
 
     while (bytes_copied < total_bytes_to_read && current_block < POINTERS_PER_BLOCK) {
-        if (indirect_block.Pointers[current_block] == 0) continue; // Nothing else to read
+        if (indirect_block.Pointers[current_block] == 0) return bytes_copied; // Nothing else to read
         mounted_disk->readDisk(mounted_disk, indirect_block.Pointers[current_block], block_buffer.Data);
 
         int bytes_to_read =  missing_bytes <= (BLOCK_SIZE-current_offset)? missing_bytes: BLOCK_SIZE-current_offset;

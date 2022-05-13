@@ -8,7 +8,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
-#include <math.h>
 
 typedef struct Bitmap {
     bool* bits; // Should be as big as the number of blocks in the disk
@@ -29,6 +28,8 @@ typedef struct InodeData {
     u_int32_t offset;
     Block inode_block;
 } InodeData;
+
+
 
 // Init functions
 void init_bitmap(Bitmap* bitmap, u_int32_t size) {
@@ -53,6 +54,44 @@ Bitmap free_blocks; // free blocks bitmap
 InodeTable inode_table; // stores available INodes    
 
 // Helper functions ----------------------
+union float_int {
+    float f;
+    int i;
+};
+
+float ceil(float x) {
+    union float_int val;
+    val.f = x;
+    int sign = val.i >> 31;
+    int exponent = ((val.i & 0x7fffffff) >> 23) - 127;
+    int mantissa = val.i & 0x7fffff;
+
+    if(exponent < 0){
+        if(x <= 0.0f) return 0.0f;
+        else return 1.0f;
+    }
+    else{
+        int mask=0x7fffff >> exponent;
+
+        if((mantissa & mask) == 0) return x;
+        else{
+            if(!sign){
+                mantissa += 1 << (23 - exponent);
+
+                if(mantissa & 0x800000){
+                    mantissa = 0;
+                    exponent++;
+                }
+            }
+            mantissa &= ~mask;
+        }
+    }
+
+    val.i = (sign << 31) | ((exponent + 127) << 23) | mantissa;
+
+    return val.f;
+}
+
 u_int32_t get_inode_number_given_block_number_and_offset(u_int32_t block_number, u_int32_t inode_index_in_block) {
     return (block_number-1)*INODES_PER_BLOCK + inode_index_in_block;
 }
@@ -93,7 +132,7 @@ void debug(Disk *disk) {
 
     // Read Superblock
     disk->readDisk(disk, 0, super_block.Data);
-    
+
     printf("SuperBlock:\n");
     printf("    magic number is %s\n", (super_block.Super.MagicNumber == MAGIC_NUMBER ? "valid" : "invalid"));
     printf("    %u blocks\n", super_block.Super.Blocks);
@@ -421,7 +460,7 @@ int allocate_block() {
         }
     }
     return -1;
-} 
+}
 
 void update_inode_and_save(int bytes_copied, int offset, InodeData* idata) {
     int real_logical_size = idata->inode->Size - offset;
